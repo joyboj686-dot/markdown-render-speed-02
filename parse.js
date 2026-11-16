@@ -9,7 +9,17 @@ function unescape(s){return s.replace(/&#(?:[xX][\da-fA-F]{1,6}|\d{1,7});/g,x=>d
 function url(s){try{return esc(encodeURI(s).replace(/%25/g,'%'),false);}catch{return null;}}
 function key(s){return s.trim().replace(/\s+/g,' ').replace(/ẞ/g,'ss').toUpperCase().toLowerCase();}
 function indent(s){let n=0,i=0;for(;i<s.length;i++){if(s[i]===' ')n++;else if(s[i]==='\t')n+=4-n%4;else break;}return n;}
-function strip(s,n){if(n>0&&n<4&&/^[ \t]*\t/.test(s))s=' '.repeat(indent(s))+s.replace(/^[ \t]*/,'');let col=0,i=0;while(i<s.length&&col<n){if(s[i]===' ')col++;else if(s[i]==='\t')col+=4-col%4;else break;i++;}return ' '.repeat(Math.max(0,col-n))+s.slice(i);}
+// Expand the leading whitespace run to spaces using 4-column tab stops, then drop
+// the first n columns. A tab that straddles the cut leaves the extra columns as
+// spaces, which is how CommonMark (and marked) treats tab indentation everywhere a
+// container strips indentation: list items, blockquotes and indented/fenced code.
+// Leading-tab expansion. In running text containers (list items, blockquotes) marked
+// expands each tab in the leading whitespace run out to the next 4-column stop and then
+// removes `n` columns; any columns the tab ran past the cut stay as spaces.
+function strip(s,n){if(n<=0)return s;let i=0,col=0;while(i<s.length){let c=s.charCodeAt(i);if(c===32){col++;i++;}else if(c===9){col+=4-col%4;i++;}else break;}if(i===0)return s;return col>n?' '.repeat(col-n)+s.slice(i):s.slice(i);}
+// Code containers strip indentation column-wise and never rewrite tabs: a tab that
+// straddles the cut is consumed whole, and tabs past it are kept verbatim.
+function stripCode(s,n){let i=0,col=0;while(i<s.length&&col<n){let c=s.charCodeAt(i);if(c===32)col++;else if(c===9)col+=4-col%4;else break;i++;}return col>n?' '.repeat(col-n)+s.slice(i):s.slice(i);}
 function blank(s){return !s||/^[ \t]*$/.test(s);}
 function hr(s){return /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(s);}
 const htmlTag='[A-Za-z][A-Za-z0-9-]*';
@@ -37,16 +47,16 @@ function definition(lines,i,refs){let text=lines.slice(i,Math.min(i+12,lines.len
 function cells(s){let a=s.trim().replace(/^\|/,'').replace(/\|[ \t]*$/,'').split(/(?<!\\)\|/);return a.map(x=>x.trim().replace(/\\\|/g,'|'));}
 function tableDelimiter(s){let a=cells(s);return a.length&&a.every(x=>/^:?-+:?$/.test(x))?a.map(x=>x[0]===':'?(x.at(-1)===':'?'center':'left'):(x.at(-1)===':'?'right':null)):null;}
 function hasOpenFence(body){let open=null;for(let l of body){let f=fence(l.replace(/\u0001/g,''));if(f){if(!open)open=f[2];else if(f[2][0]===open[0]&&f[2].length>=open.length&&!f[3].trim())open=null;}}return !!open;}
-function blocks(lines,refs){let out=[],i=0;
- while(i<lines.length){let line=lines[i];if(blank(line)){i++;continue;}let n=definition(lines,i,refs);if(n){i+=n;continue;}
- let f=fence(line);if(f){let body=[],re=new RegExp('^ {0,3}'+f[2][0]+'{'+f[2].length+',}[ \\t]*$');i++;while(i<lines.length&&!re.test(lines[i]))body.push(strip(lines[i++].replace(/\u0001/g,''),f[1].length));if(i<lines.length)i++;out.push({type:'code',text:body.join('\n').replace(/\u0001/g,'')+(body.length&&body.at(-1)!==''?'\n':''),info:unescape(f[3].trim().split(/\s+/)[0])});continue;}
- if(indent(line)>=4){let body=[];while(i<lines.length&&(blank(lines[i])||indent(lines[i])>=4))body.push(strip(lines[i],4)),i++;while(body.length&&body.at(-1)==='')body.pop();out.push({type:'code',text:body.join('\n')+'\n',info:''});continue;}
+ function blocks(lines,refs){let out=[],i=0,origin=0;out.push=function(node){node.origin=origin;node.end=i;return Array.prototype.push.call(this,node);};
+ while(i<lines.length){origin=i;let line=lines[i];if(blank(line)){i++;continue;}let n=definition(lines,i,refs);if(n){i+=n;continue;}
+ let f=fence(line);if(f){let body=[],re=new RegExp('^ {0,3}'+f[2][0]+'{'+f[2].length+',}[ \\t]*$');i++;while(i<lines.length&&!re.test(lines[i]))body.push(stripCode(lines[i++].replace(/\u0001/g,''),f[1].length));if(i<lines.length)i++;out.push({type:'code',text:body.join('\n').replace(/\u0001/g,'')+(body.length&&body.at(-1)!==''?'\n':''),info:unescape(f[3].trim().split(/\s+/)[0])});continue;}
+ if(indent(line)>=4){let body=[];while(i<lines.length&&(blank(lines[i])||indent(lines[i])>=4))body.push(stripCode(lines[i],4)),i++;while(body.length&&body.at(-1)==='')body.pop();out.push({type:'code',text:body.join('\n')+'\n',info:''});continue;}
  let h=/^ {0,3}(#{1,6})(?:[ \t]+(.*)|$)/.exec(line);if(h){let t=(h[2]||'').trim();t=t.replace(/(?:^|[ \t]+)#+[ \t]*$/,'');out.push({type:'heading',level:h[1].length,text:t});i++;continue;}
  if(hr(line)){out.push({type:'hr'});i++;continue;}
  let ht=htmlStart(line);if(ht){let body=[];do{let l=lines[i++];body.push(l.replace(/\u0001/g,''));if(ht.end&&ht.end.test(l))break;}while(i<lines.length&&(ht.end||!blank(lines[i])));out.push({type:'html',text:body.join('\n')+(i<lines.length&&!blank(lines[i])||i===lines.length&&lines.endNewline||ht.end&&i<lines.length&&lines[i]!==''?'\n':'')});continue;}
  if(/^ {0,3}>/.test(line)){let body=[],lazy=false,inFence=null;while(i<lines.length){let l=lines[i];if(/^ {0,3}>/.test(l)){let x=l.replace(/^ {0,3}>/,'');let col=l.indexOf('>')+1,ws=/^[ \t]*/.exec(x)[0],endcol=col;for(let ch of ws)endcol+=ch==='\t'?4-endcol%4:1;x=' '.repeat(endcol-col)+x.slice(ws.length);if(x[0]===' ')x=x.slice(1);body.push(x===''?x:/^[ \t]+$/.test(x)&&body.some(y=>!blank(y))?'\u0001'+x:x);if(l.includes('\u0001'))lazy=false;else lazy=!blank(x)&&indent(x)<4&&!fence(x)&&!hr(x)&&!/^ {0,3}#{1,6}(?:\s|$)/.test(x);let ff=fence(x);if(ff)inFence=inFence?null:ff[2];if(inFence)lazy=false;i++;}else if(lazy&&!blank(l)&&!interrupts(l)){body.push('\u0001'+(/^=+[ \t]*$/.test(l)?'    '+l:l.trimStart()));i++;}else break;}out.push({type:'quote',children:blocks(body,refs)});continue;}
  let lm=marker(line);if(lm){let items=[],itemLoose=[],loose=false;while(i<lines.length){let m=marker(lines[i]);if(!m||m.ordered!==lm.ordered||m.mark!==lm.mark||hr(lines[i]))break;let body=[m.body],hadBlank=false,internalBlank=false;i++;while(i<lines.length){let l=lines[i];if(hasOpenFence(body)){body.push(strip(l,m.width));i++;continue;}if(blank(l)){if(m.empty&&body.every(blank)){i++;hadBlank=true;body.push('');break;}body.push('');hadBlank=true;i++;continue;}let next=marker(l);if(next&&next.indent<m.width)break;if(indent(l)>=m.width){if(hadBlank&&body.some(x=>!blank(x))&&(!body.some(x=>marker(x)||x.startsWith('\u0001')&&marker(x.slice(1)))||indent(l)===m.width)&&(!body.some(x=>fence(x))||indent(l)===m.width&&!fence(strip(l,m.width))))internalBlank=true;body.push(strip(l,m.width));i++;hadBlank=false;continue;}if(hadBlank||interrupts(l)||blank(body.at(-1))||hasOpenFence(body))break;body.push('\u0001'+l.trimStart());i++;}
- let trailing=0;while(body.length&&blank(body.at(-1))){body.pop();trailing++;}let next=marker(lines[i]||'');if((trailing&&(body.length||m.empty&&hadBlank)&&next&&next.ordered===lm.ordered&&next.mark===lm.mark))loose=true;body.container=true;let children=blocks(body,refs);if(internalBlank)loose=true;items.push(children);if(!next||next.ordered!==lm.ordered||next.mark!==lm.mark)break;}
+ let trailing=0;while(body.length&&blank(body.at(-1))){body.pop();trailing++;}let next=marker(lines[i]||'');if((trailing&&(body.length||m.empty&&hadBlank)&&next&&next.ordered===lm.ordered&&next.mark===lm.mark))loose=true;body.container=true;let children=blocks(body,refs);if(children.some((child,j)=>j>0&&blank(body[child.origin-1])))loose=true;else if(children.length){let le=children[children.length-1].end;if(le<body.length&&blank(body[le]))loose=true;}items.push(children);if(!next||next.ordered!==lm.ordered||next.mark!==lm.mark)break;}
  out.push({type:'list',ordered:lm.ordered,start:lm.start,items,loose});continue;}
  let para=[line];i++;let done=false;while(i<lines.length&&!blank(lines[i])){let l=lines[i];if(/^ {0,3}(?:=+|-+)[ \t]*$/.test(l)){out.push({type:'heading',level:l.trim()[0]==='='?1:2,text:para.join('\n').trim()});i++;done=true;break;}if(para.length===1&&l.includes('-')){let align=tableDelimiter(l),head=cells(para[0]);if(align&&align.length===head.length&&para[0].includes('|')){i++;let rows=[];while(i<lines.length&&!/^ *$/.test(lines[i])&&(!interrupts(lines[i])||/^[ \t]+$/.test(lines[i])))rows.push(cells(lines[i++]));out.push({type:'table',head,align,rows});done=true;break;}}
  if(interrupts(l)||marker(l)&&lines.container)break;para.push(l);i++;}
@@ -54,7 +64,13 @@ function blocks(lines,refs){let out=[],i=0;
  }return out;
 }
 function inline(src,refs,inLink=false,plain=false,noGfm=false){
- let tokens=[],delims=[],i=0;const masked=[];for(let p=0;(p=src.indexOf('`',p))>=0;){let e=p;while(src[e]==='`')e++;let q=e,found=-1;while((q=src.indexOf('`',q))>=0){let r=q;while(src[r]==='`')r++;if(r-q===e-p){found=r;break;}q=r;}if(found<0){p=e;continue;}masked.push([p,found]);p=found;}const add=(s)=>{if(s)tokens.push({text:s});};
+ let tokens=[],delims=[],i=0;const masked=[];
+ // Pre-pass: pair up backtick runs so the escape/strikethrough/emphasis rules can tell
+ // which delimiters live inside a code span. Once a run has opened a span, the closing
+ // run is the next run of the same length; runs of other lengths are skipped, which is
+ // what marked's scanner does (it never treats a trailing lone backtick as a closer).
+ const scanBackticks=()=>{const m=[];for(let p=0;(p=src.indexOf('`',p))>=0;){let e=p;while(src[e]==='`')e++;let q=e,found=-1;while((q=src.indexOf('`',q))>=0){let r=q;while(src[r]==='`')r++;if(r-q===e-p){found=r;break;}q=r;}if(found<0){p=e;continue;}m.push([p,found]);p=found;}return m;};
+ masked.push(...scanBackticks());const add=(s)=>{if(s)tokens.push({text:s});};
  while(i<src.length){let c=src[i],rest=src.slice(i),m;
  if(c==='&'&&(m=/^&#(?:[xX][\da-fA-F]{1,6}|\d{1,7});/.exec(rest))){add(esc(decode(m[0])));i+=m[0].length;continue;}
  if(c==='&'&&/^&#/.test(rest)){add('&amp;');i++;continue;}
